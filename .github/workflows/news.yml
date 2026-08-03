@@ -14,7 +14,7 @@ jobs:
       NOTION_READER_DATABASE_ID: ${{ secrets.NEWS_READER_DATABASE_ID }}
       NOTION_FEEDS_DATABASE_ID: ${{ secrets.NEWS_FEEDS_DATABASE_ID }}
       FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
-      RUN_FREQUENCY: 259200
+      RUN_FREQUENCY: 86400
 
     steps:
       - name: Checkout code
