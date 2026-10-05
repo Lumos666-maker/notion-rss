@@ -12,7 +12,7 @@ from notion import get_feed_urls_from_notion, get_existing_items_since
 load_dotenv()
 
 logger = logging.getLogger(__name__)
-RUN_FREQUENCY = int(os.getenv("RUN_FREQUENCY", "86400"))
+RUN_FREQUENCY = int(os.getenv("RUN_FREQUENCY", "259200"))
 _MAX_FETCH_WORKERS = 5
 
 
