@@ -1,12 +1,8 @@
 """Attach full text and, when configured, a Chinese summary to each new item.
 
-Full-text fetch follows FULLTEXT_FETCH:
-  auto (default) — fetch only when LLM_API_KEY, LLM_BASE_URL, and LLM_MODEL are set
-  1 — always fetch
-  0 — keep the RSS HTML body
-
-Without the three LLM variables, summaries are skipped and 处理状态 stays 收录中,
-which is the historical ingest behavior.
+Full text is on unless FULLTEXT_FETCH is 0/false/off. The LLM is optional:
+without LLM_API_KEY, LLM_BASE_URL, and LLM_MODEL the page still gets a body
+and 处理状态=已整理, but no 摘要 and no translated title.
 """
 
 import logging
@@ -27,12 +23,9 @@ logger = logging.getLogger(__name__)
 
 
 def fulltext_enabled() -> bool:
-    flag = os.getenv("FULLTEXT_FETCH", "auto").strip().lower()
-    if flag in ("0", "false", "no", "off"):
-        return False
-    if flag in ("1", "true", "yes", "on"):
-        return True
-    return llm_configured()
+    """Full text is the default. Set FULLTEXT_FETCH=0 to keep the RSS HTML only."""
+    flag = os.getenv("FULLTEXT_FETCH", "1").strip().lower()
+    return flag not in ("0", "false", "no", "off")
 
 
 def _worker_count() -> int:
@@ -101,6 +94,9 @@ def enrich_one(item: dict, *, fallback_text: str = "") -> dict:
         payload["teaser_only"] = teaser_only
 
     if not llm_configured():
+        # Body is either the article or the RSS HTML. Both are finished ingest.
+        payload["summary"] = None
+        payload["status"] = "已整理"
         return payload
 
     try:
@@ -248,6 +244,13 @@ def _enrich_page(page: dict, page_text) -> dict:
         payload["teaser_only"] = teaser_only
 
     if not llm_configured():
+        payload["summary"] = None
+        if payload["fulltext"]:
+            payload["status"] = "已整理"
+        else:
+            # Nothing new to store. Leave the existing body and status alone.
+            payload["content"] = None
+            payload["status"] = None
         return payload
 
     try:
@@ -269,6 +272,33 @@ def _enrich_page(page: dict, page_text) -> dict:
     payload["status"] = "已整理"
     payload["title"] = _display_title(payload["title"], title, title_zh)
     return payload
+
+
+def fetch_fulltext_for_pages(pages: list[dict]) -> list[list[dict] | None]:
+    """Fetch article blocks for each page, in input order. None means the fetch failed."""
+    def _job(page: dict):
+        url = page.get("link") or ""
+
+        def run() -> list[dict] | None:
+            return fulltext_blocks(url)
+        return run
+
+    return _run_pool([_job(page) for page in pages])
+
+
+def fulltext_blocks(url: str) -> list[dict] | None:
+    """Notion blocks for a URL, or None when the article could not be fetched."""
+    if not fulltext_enabled() or not url:
+        return None
+    try:
+        text = fetch_article_text(url)
+    except Exception as err:
+        logger.info("Full text error for %s: %s", url, err)
+        return None
+    if not text:
+        return None
+    blocks = text_to_notion_blocks(text)
+    return blocks or None
 
 
 def _log_stats(prepared: list[dict]) -> None:

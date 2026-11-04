@@ -8,7 +8,7 @@ from blocklist import is_blocked, reset_cache
 from enrich import enrich_one, fulltext_enabled
 import notion
 from feed import select_new_items
-from notion import _minimal_properties, _reader_properties
+from notion import _minimal_properties, _reader_properties, body_blocks_are_empty
 from fulltext import _is_interstitial
 from parser import text_to_notion_blocks
 from summarize import (
@@ -143,6 +143,22 @@ class NotionPropertyTest(unittest.TestCase):
         self.assertEqual(props["处理状态"]["status"]["name"], "收录中")
 
 
+class EmptyBodyTest(unittest.TestCase):
+    def test_blank_paragraphs_count_as_empty(self):
+        blocks = [
+            {"type": "paragraph", "paragraph": {"rich_text": []}},
+            {"type": "paragraph", "paragraph": {"rich_text": [{"plain_text": "  "}]}},
+        ]
+        self.assertTrue(body_blocks_are_empty(blocks))
+        self.assertTrue(body_blocks_are_empty([]))
+
+    def test_text_or_image_counts_as_body(self):
+        text = {"type": "paragraph", "paragraph": {"rich_text": [{"plain_text": "提要"}]}}
+        image = {"type": "image", "image": {}}
+        self.assertFalse(body_blocks_are_empty([text]))
+        self.assertFalse(body_blocks_are_empty([image]))
+
+
 class InterstitialTest(unittest.TestCase):
     def test_script_captcha_on_a_long_page_is_kept(self):
         html = "<html><script>loadCaptcha()</script><article>" + ("正文段落。" * 400) + "</article></html>"
@@ -158,8 +174,13 @@ class EnrichTest(unittest.TestCase):
         for key in ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL", "FULLTEXT_FETCH"):
             os.environ.pop(key, None)
 
-    def test_without_llm_keeps_rss_body_and_status(self):
+    def test_fulltext_is_on_without_llm(self):
+        self.assertTrue(fulltext_enabled())
+        os.environ["FULLTEXT_FETCH"] = "0"
         self.assertFalse(fulltext_enabled())
+
+    def test_without_llm_writes_full_text_and_marks_done(self):
+        article = "第一段足够作为正文。" + "内容" * 40
         item = {
             "title": "OpenAI ships a new model",
             "link": "https://example.com/a",
@@ -167,14 +188,45 @@ class EnrichTest(unittest.TestCase):
             "published_date": "2026-11-01",
             "source": "Example",
         }
-        with mock.patch("enrich.fetch_article_text") as fetch:
+        with mock.patch("enrich.fetch_article_text", return_value=article) as fetch, mock.patch(
+            "enrich.summarize_item"
+        ) as summarize:
             payload = enrich_one(item)
-        fetch.assert_not_called()
-        self.assertEqual(payload["status"], "收录中")
+        fetch.assert_called_once_with(item["link"])
+        summarize.assert_not_called()
+        self.assertEqual(payload["status"], "已整理")
         self.assertIsNone(payload["summary"])
         self.assertEqual(payload["title"], item["title"])
-        self.assertTrue(payload["content"])
+        self.assertTrue(payload["fulltext"])
         self.assertFalse(payload["llm_ok"])
+        joined = "\n".join(
+            block["paragraph"]["rich_text"][0]["text"]["content"] for block in payload["content"]
+        )
+        self.assertIn("第一段足够作为正文", joined)
+
+    def test_without_llm_fetch_failure_keeps_rss_and_marks_done(self):
+        item = {
+            "title": "OpenAI ships a new model",
+            "link": "https://example.com/a",
+            "content": "<p>Just a teaser from the feed.</p>",
+            "published_date": "2026-11-01",
+            "source": "Example",
+        }
+        with mock.patch("enrich.fetch_article_text", return_value=None), mock.patch(
+            "enrich.summarize_item"
+        ) as summarize:
+            payload = enrich_one(item)
+        summarize.assert_not_called()
+        self.assertEqual(payload["status"], "已整理")
+        self.assertIsNone(payload["summary"])
+        self.assertEqual(payload["title"], item["title"])
+        self.assertFalse(payload["fulltext"])
+        self.assertTrue(payload["teaser_only"])
+        joined = "\n".join(
+            block["paragraph"]["rich_text"][0]["text"]["content"] for block in payload["content"]
+        )
+        self.assertIn("Just a teaser from the feed", joined)
+        self.assertNotIn("<p>", joined)
 
     def test_teaser_prefix_when_fetch_fails(self):
         os.environ["LLM_API_KEY"] = "test-key"

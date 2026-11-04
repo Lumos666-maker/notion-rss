@@ -314,20 +314,50 @@ def add_feed_item_to_notion(notion_item: dict) -> bool:
     return True
 
 
+def _reader_page(item: dict) -> dict:
+    props = item.get("properties", {})
+    date_value = (props.get("发布日期", {}).get("date") or {}).get("start")
+    status_value = (props.get("处理状态", {}).get("status") or {}).get("name") or ""
+    return {
+        "id": item.get("id"),
+        "title": _plain_rich_text(props.get("名称", {}).get("title")),
+        "link": props.get("听原文", {}).get("url") or "",
+        "summary": _plain_rich_text(props.get("摘要", {}).get("rich_text")),
+        "status": status_value,
+        "published_date": date_value,
+    }
+
+
+def _created_since(days: int) -> str:
+    since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
+    return since.isoformat()
+
+
+def get_recent_pages(days: int = 3) -> list[dict]:
+    """Every reader page created in the last `days`, regardless of summary or status."""
+    payload = {
+        "filter": {
+            "timestamp": "created_time",
+            "created_time": {"on_or_after": _created_since(days)},
+        }
+    }
+    results = _query_database_with_pagination(NOTION_READER_DATABASE_ID, payload)
+    return [_reader_page(item) for item in results]
+
+
 def get_backfill_candidates(days: int = 3) -> list[dict]:
     """Pages created in the last `days` with an empty 摘要 or 处理状态=收录中."""
     schema = _load_reader_schema()
     if schema is not None and schema.get("摘要") != "rich_text":
-        logger.warning("Reader database has no rich_text 摘要 property; backfill skipped")
+        logger.warning("Reader database has no rich_text 摘要 property; summary backfill skipped")
         return []
 
-    since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
     payload = {
         "filter": {
             "and": [
                 {
                     "timestamp": "created_time",
-                    "created_time": {"on_or_after": since.isoformat()},
+                    "created_time": {"on_or_after": _created_since(days)},
                 },
                 {
                     "or": [
@@ -339,20 +369,70 @@ def get_backfill_candidates(days: int = 3) -> list[dict]:
         }
     }
     results = _query_database_with_pagination(NOTION_READER_DATABASE_ID, payload)
-    candidates: list[dict] = []
-    for item in results:
-        props = item.get("properties", {})
-        date_value = (props.get("发布日期", {}).get("date") or {}).get("start")
-        status_value = (props.get("处理状态", {}).get("status") or {}).get("name") or ""
-        candidates.append({
-            "id": item.get("id"),
-            "title": _plain_rich_text(props.get("名称", {}).get("title")),
-            "link": props.get("听原文", {}).get("url") or "",
-            "summary": _plain_rich_text(props.get("摘要", {}).get("rich_text")),
-            "status": status_value,
-            "published_date": date_value,
-        })
-    return candidates
+    return [_reader_page(item) for item in results]
+
+
+_TEXT_BLOCK_TYPES = {
+    "paragraph",
+    "heading_1",
+    "heading_2",
+    "heading_3",
+    "bulleted_list_item",
+    "numbered_list_item",
+    "to_do",
+    "quote",
+    "callout",
+    "toggle",
+    "code",
+}
+
+
+def _block_plain(block: dict) -> str:
+    block_type = block.get("type")
+    body = block.get(block_type) or {}
+    return _plain_rich_text(body.get("rich_text")).strip()
+
+
+def body_blocks_are_empty(blocks: list[dict]) -> bool:
+    """True when the page has no text and no non-text block such as an image."""
+    for block in blocks:
+        block_type = block.get("type")
+        if block_type not in _TEXT_BLOCK_TYPES:
+            return False
+        if _block_plain(block):
+            return False
+    return True
+
+
+def page_body_is_empty(page_id: str) -> bool:
+    """True when the page has no readable body. A failed read is treated as not empty."""
+    if not page_id:
+        return False
+    cursor: str | None = None
+    while True:
+        params: dict[str, str | int] = {"page_size": 100}
+        if cursor:
+            params["start_cursor"] = cursor
+        try:
+            response = requests.get(
+                f"{NOTION_BASE_URL}/blocks/{page_id}/children",
+                headers=_get_headers(),
+                params=params,
+                timeout=_REQUEST_TIMEOUT,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except requests.exceptions.RequestException as err:
+            logger.error("Error reading page %s: %s", page_id, err)
+            return False
+        blocks = data.get("results", [])
+        if not body_blocks_are_empty(blocks):
+            return False
+        if not data.get("has_more"):
+            return True
+        cursor = data.get("next_cursor")
+        if not cursor:
+            return True
 
 
 def get_page_plain_text(page_id: str, *, max_chars: int = 6000) -> str:
@@ -380,9 +460,7 @@ def get_page_plain_text(page_id: str, *, max_chars: int = 6000) -> str:
             break
 
         for block in data.get("results", []):
-            block_type = block.get("type")
-            body = block.get(block_type) or {}
-            text = _plain_rich_text(body.get("rich_text")).strip()
+            text = _block_plain(block)
             if not text:
                 continue
             parts.append(text)
@@ -499,7 +577,7 @@ def update_reader_page(
                 return False
 
     if blocks:
-        _replace_children(page_id, blocks)
+        return _replace_children(page_id, blocks)
     return True
 
 
