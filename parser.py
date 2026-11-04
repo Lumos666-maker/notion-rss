@@ -1,12 +1,20 @@
+import html
 import logging
+import os
 import re
 
 from markdownify import markdownify as turndown
 
 logger = logging.getLogger(__name__)
 NOTION_MAX_TEXT_LENGTH = 2000
+# A long article is split across blocks; cap the body so a single page stays
+# well under Notion's request size. ~30k Chinese characters is several screens.
+_DEFAULT_BODY_CHARS = 30000
+_MAX_BODY_BLOCKS = 120
 _LINK_RE = re.compile(r'\[(.+?)]\((.+?)\)')
 _NUMBERED_LIST_RE = re.compile(r'^\d+\.\s')
+_TAG_RE = re.compile(r"(?is)<(script|style|noscript).*?>.*?</\1>")
+_ANY_TAG_RE = re.compile(r"(?s)<[^>]+>")
 
 
 def html_to_markdown(html_content: str) -> str:
@@ -80,3 +88,59 @@ def html_to_notion_blocks(html_content: str) -> list[dict]:
     """Convert HTML content to Notion blocks."""
     markdown = html_to_markdown(html_content)
     return markdown_to_notion_blocks(markdown)
+
+
+def html_to_plain_text(html_content: str) -> str:
+    """Strip markup for summaries and blocklist checks. Plain text is returned as-is."""
+    if not html_content:
+        return ""
+    text = _TAG_RE.sub(" ", html_content)
+    text = _ANY_TAG_RE.sub(" ", text)
+    text = html.unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _body_char_limit() -> int:
+    try:
+        limit = int(os.getenv("FULLTEXT_BODY_MAX_CHARS", str(_DEFAULT_BODY_CHARS)))
+    except ValueError:
+        limit = _DEFAULT_BODY_CHARS
+    return max(2000, min(limit, 100000))
+
+
+def _split_chunks(text: str, limit: int = NOTION_MAX_TEXT_LENGTH) -> list[str]:
+    """Split a paragraph into Notion rich-text sized pieces, preferring sentence breaks."""
+    chunks: list[str] = []
+    start = 0
+    length = len(text)
+    while start < length:
+        end = min(start + limit, length)
+        if end < length:
+            window = text[start:end]
+            cuts = [window.rfind(mark) for mark in ("\n", "。", "！", "？", ".", " ")]
+            cut = max(cuts)
+            if cut >= limit // 2:
+                end = start + cut + 1
+        piece = text[start:end].strip()
+        if piece:
+            chunks.append(piece)
+        start = end
+    return chunks
+
+
+def text_to_notion_blocks(text: str, *, max_chars: int | None = None) -> list[dict]:
+    """Turn cleaned article text into paragraph blocks, truncated to Notion limits."""
+    if not text:
+        return []
+    limit = max_chars if max_chars is not None else _body_char_limit()
+    clipped = text.replace("\r\n", "\n").replace("\r", "\n").strip()[:limit]
+    blocks: list[dict] = []
+    for para in re.split(r"\n+", clipped):
+        para = para.strip()
+        if not para:
+            continue
+        for chunk in _split_chunks(para):
+            blocks.append(_make_block("paragraph", _make_rich_text(chunk)))
+            if len(blocks) >= _MAX_BODY_BLOCKS:
+                return blocks
+    return blocks

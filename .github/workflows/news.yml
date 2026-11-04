@@ -15,6 +15,9 @@ jobs:
       NOTION_FEEDS_DATABASE_ID: ${{ secrets.NEWS_FEEDS_DATABASE_ID }}
       FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
       RUN_FREQUENCY: 86400
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+      LLM_MODEL: ${{ secrets.LLM_MODEL }}
 
     steps:
       - name: Checkout code
